@@ -56,6 +56,13 @@ def preprocess():
     said_word = is_word == (df['accuracy'] == 1)
     df['response'] = said_word.map({True: 'word', False: 'nonword'})
 
+    # The letter string stayed on screen for at most 2 s. An incorrect trial at
+    # or past that deadline may be a timeout, in which case no button was
+    # pressed and the derived response would be an artefact; it is left empty.
+    # (A correct trial past 2 s must be a real, late press.)
+    timeout = (df['rt'] >= 2000) & (df['accuracy'] == 0)
+    df.loc[timeout, 'response'] = ''
+
     df = df[[
         'participant_id',
         'trial_id',

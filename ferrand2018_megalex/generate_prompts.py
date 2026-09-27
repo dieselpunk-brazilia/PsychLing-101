@@ -10,9 +10,15 @@ import zipfile
 # One MEGALEX session is ~27,000 trials, far over the 32K-token limit, so each
 # participant is split into chunks of consecutive blocks. Every chunk opens
 # with the instruction and says which blocks it covers.
+#
+# The prompts follow the procedure of the experiment (Ferrand et al., 2018,
+# Method): there was no feedback after individual trials, only a feedback
+# screen at the end of each block with the mean correct reaction time and the
+# percentage of errors for words. Each block began with ten practice trials,
+# which are not in the data; trials are numbered by their position in the block.
 
 EXPERIMENT = 'ferrand2018_megalex/exp1'
-BLOCKS_PER_CHUNK = 4
+BLOCKS_PER_CHUNK = 5
 TOKEN_LIMIT = 32000
 CHAR_LIMIT = 100000  # scripts/validate_submission.py rejects longer prompts
 
@@ -31,7 +37,16 @@ INSTRUCTION = (
     'words. The experiment consists of 109 blocks of about 260 items, completed '
     'over several weeks.'
 )
-CHUNK_NOTE = 'The trials below are from {blocks} of the experiment.'
+CHUNK_NOTE = ('The trials below are from {blocks} of the experiment. Each block '
+              'begins with ten practice trials, which were not recorded; trials '
+              'are numbered by their position in the block.')
+TRIAL = "Trial {number}: The letter string is '{stimulus}'. You press <<{key}>>."
+# Shown at the end of every block in the experiment: mean correct RT and
+# percentage of errors for words, recomputed here from the recorded trials.
+BLOCK_FEEDBACK = ('End of block {block}. Mean reaction time for correct responses '
+                  'to words: {rt} ms. Errors on words: {errors:.1f}%.')
+# The one trial whose response is missing (a probable timeout, see README.md).
+NO_RESPONSE = 'nothing'
 
 
 def get_token_counter():
@@ -63,17 +78,32 @@ def block_label(blocks):
     return f'blocks {blocks[0]}-{blocks[-1]}'
 
 
-def generate_prompts():
-    print("Loading preprocessed dataset")
-    df = pd.read_csv('processed_data/exp1.csv', keep_default_na=False,
-                     dtype={'stimulus': str})
-    df = df.sort_values(['participant_id', 'trial_order'])
+def block_feedback(block):
+    words = block[block['stimulus_type'] == 'word']
+    correct_rt = words.loc[words['accuracy'] == 1, 'rt']
+    return BLOCK_FEEDBACK.format(block=int(block['phase_id'].iloc[0]),
+                                 rt=round(correct_rt.mean()),
+                                 errors=100 * (1 - words['accuracy'].mean()))
 
-    count_tokens, token_method = get_token_counter()
+
+def build_chunk(participant, chunk_blocks, instruction, key_of):
+    """Text and reaction times of one chunk of consecutive blocks."""
+    lines = [instruction, '', CHUNK_NOTE.format(blocks=block_label(chunk_blocks))]
+    rt_list = []
+    for phase_id in chunk_blocks:
+        block = participant[participant['phase_id'] == phase_id]
+        lines += ['', f'Block {phase_id}:']
+        for row in block.itertuples(index=False):
+            key = key_of[row.response] if row.response else NO_RESPONSE
+            lines.append(TRIAL.format(number=row.trial_in_block,
+                                      stimulus=row.stimulus, key=key))
+            rt_list.append(float(row.rt))
+        lines.append(block_feedback(block))
+    return '\n'.join(lines), rt_list
+
+
+def build_prompts(df, blocks_per_chunk=BLOCKS_PER_CHUNK):
     all_prompts = []
-    max_tokens, max_chars = 0, 0
-
-    print("Grouping trials by participant and block")
     for participant_id, participant in df.groupby('participant_id'):
 
         word_key, nonword_key = participant_keys(participant_id)
@@ -81,36 +111,9 @@ def generate_prompts():
         instruction = INSTRUCTION.format(word_key=word_key, nonword_key=nonword_key)
 
         blocks = sorted(participant['phase_id'].unique())
-        for start in range(0, len(blocks), BLOCKS_PER_CHUNK):
-            chunk_blocks = [int(b) for b in blocks[start:start + BLOCKS_PER_CHUNK]]
-
-            lines = [instruction, '', CHUNK_NOTE.format(blocks=block_label(chunk_blocks))]
-            rt_list = []
-
-            for phase_id in chunk_blocks:
-                block = participant[participant['phase_id'] == phase_id]
-                lines += ['', f'Block {phase_id}:']
-
-                for trial_counter, row in enumerate(block.itertuples(index=False), start=1):
-                    feedback = 'Correct.' if row.accuracy == 1 else 'Incorrect.'
-                    lines.append(f"Trial {trial_counter}: The letter string is "
-                                 f"'{row.stimulus}'. You press <<{key_of[row.response]}>>. "
-                                 f"{feedback}")
-                    rt_list.append(float(row.rt))
-
-            text = '\n'.join(lines)
-
-            # Responses are the only thing wrapped in << >>, one per trial.
-            assert text.count('<<') == text.count('>>') == len(rt_list)
-            assert text.replace('<<', '').replace('>>', '').count('<') == 0
-            assert text.replace('<<', '').replace('>>', '').count('>') == 0
-
-            n_tokens = count_tokens(text)
-            assert n_tokens < TOKEN_LIMIT, (participant_id, chunk_blocks, n_tokens)
-            assert len(text) < CHAR_LIMIT, (participant_id, chunk_blocks, len(text))
-            max_tokens = max(max_tokens, n_tokens)
-            max_chars = max(max_chars, len(text))
-
+        for start in range(0, len(blocks), blocks_per_chunk):
+            chunk_blocks = [int(b) for b in blocks[start:start + blocks_per_chunk]]
+            text, rt_list = build_chunk(participant, chunk_blocks, instruction, key_of)
             all_prompts.append({
                 'text': text,
                 'experiment': EXPERIMENT,
@@ -118,6 +121,34 @@ def generate_prompts():
                 'blocks': chunk_blocks,
                 'rt': rt_list,
             })
+    return all_prompts
+
+
+def load_trials():
+    df = pd.read_csv('processed_data/exp1.csv', keep_default_na=False,
+                     dtype={'stimulus': str, 'response': str})
+    return df.sort_values(['participant_id', 'trial_order'])
+
+
+def generate_prompts():
+    print("Loading preprocessed dataset")
+    df = load_trials()
+
+    print("Grouping trials by participant and block")
+    all_prompts = build_prompts(df)
+
+    count_tokens, token_method = get_token_counter()
+    max_tokens, max_chars = 0, 0
+    for prompt in all_prompts:
+        text = prompt['text']
+        # Responses are the only thing wrapped in << >>, one per trial.
+        assert text.count('<<') == text.count('>>') == len(prompt['rt'])
+        assert '<' not in text.replace('<<', '') and '>' not in text.replace('>>', '')
+        n_tokens = count_tokens(text)
+        assert n_tokens < TOKEN_LIMIT, (prompt['participant_id'], prompt['blocks'], n_tokens)
+        assert len(text) < CHAR_LIMIT, (prompt['participant_id'], prompt['blocks'], len(text))
+        max_tokens = max(max_tokens, n_tokens)
+        max_chars = max(max_chars, len(text))
 
     n_trials = sum(len(p['rt']) for p in all_prompts)
     assert n_trials == len(df), (n_trials, len(df))
