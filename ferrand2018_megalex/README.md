@@ -40,7 +40,7 @@ ferrand2018_megalex/
 Extracted without modification from `By trials Auditory & Visual-MEGALEX.zip`:
 
 - `Visual.WpuispW.essais_ElTec.txt` — trial-level visual lexical decision data, words and pseudowords, 2,596,095 rows. Semicolon-separated; the header names 9 columns but every row has 10 fields, the first one being an unnamed row index written by R.
-- `Infos sur libellés variables.txt` — the authors' short description of the columns (in French).
+- `infos_variables.txt` — the authors' short description of the columns (in French; renamed from "Infos sur libellés variables.txt", which contains spaces).
 
 ### `processed_data/exp1.csv`
 One row per trial, 2,596,095 rows, sorted by participant and presentation order. Produced by `preprocess_data.py` (about 10 s).
